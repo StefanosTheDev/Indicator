@@ -112,28 +112,6 @@ Feel free to extend this bot with live order placement, additional analytics, or
 
 ---
 
-## Developer Notes
-
-- **Node.js & TypeScript Versions**: Ensure you are running Node.js v16+ and TypeScript v4.5+ for proper `Readable` stream and ES module support.
-- **Environment Variables**: Store your Databento API key in a `.env` file and load via `dotenv` if you prefer:
-  ```bash
-  npm install dotenv
-  ```
-  ```ts
-  import 'dotenv/config';
-  ```
-- **tsconfig.json**: Use strict settings with target `ES2020` and module `CommonJS`:
-  ```json
-  {
-    "compilerOptions": {
-      "target": "ES2020",
-      "module": "CommonJS",
-      "strict": true,
-      "esModuleInterop": true,
-      "skipLibCheck": true
-    }
-  }
-  ```
 - **Error Handling & Retries**: For production, wrap HTTP calls with retry/backoff logic (e.g., using `axios-retry`) to handle transient network errors.
 - **Logging**: Integrate a logging library (e.g., `pino` or `winston`) instead of `console.log` for structured logs, log levels, and file output.
 - **Testing**: Add unit tests with Jest for each module (`streamTradesPaged`, `streamOneMinuteBars`, trendline functions) and mock `axios` streams.
