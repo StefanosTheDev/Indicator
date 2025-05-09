@@ -16,7 +16,8 @@ const SYMBOL = 'MESM5';
 interface Trade {
   px: number;
   size: number;
-  side: 'B' | 'S';
+  // https://databento.com/docs/standards-and-conventions/common-fields-enums-types#side?historical=http&live=python&reference=http
+  side: 'B' | 'S';  // 'A' | 'B' | 'N'
   ts_ms: number;
 }
 
@@ -132,6 +133,7 @@ async function* streamOneMinuteBars(
     const dt = new Date(ts_ms);
     dt.setSeconds(0, 0);
     const iso = dt.toISOString();
+    // consider neutral bars; should not impact delta
     const delta = side === 'B' ? size : -size;
     runningCvd += delta;
 
