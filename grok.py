@@ -4,8 +4,9 @@ process_1min_cvd_with_trendlines_with_reversal_filter_and_stop.py
 
 Stream 1-min MESM5 bars with cumulative delta (CVD),
 compute rolling 5-bar support/resistance trendlines on the CVD series,
-apply real-world trading filters, wait for each trend reversal,
-handle stop-loss & take-profit events, and detect cleaner breakouts with re-entry.
+apply real-world trading filters including user-defined market strategies,
+wait for each trend reversal, handle stop-loss & take-profit events,
+and detect cleaner breakouts with re-entry.
 """
 
 import os
@@ -59,7 +60,7 @@ def stream_trades_paged(key, dataset, schema, start_utc, end_utc, symbol):
                    'ts_ms': ts_ms}
         cur_start = last_ts + 1
 
-# ── CVD bar aggregation ────────────────────────────────────────────────────────
+# ── CVD Bar Aggregation ────────────────────────────────────────────────────────
 def get_cvd_color(close, open_, prev_high, prev_low, strong):
     if not strong:
         if close > open_: return 'green'
@@ -72,7 +73,6 @@ def get_cvd_color(close, open_, prev_high, prev_low, strong):
     if close > prev_high: return 'green'
     if close < prev_low:  return 'red'
     return 'gray'
-
 
 def stream_one_minute_bars(key, dataset, schema, start_utc, end_utc, symbol, strong_updown=True):
     current     = None
@@ -195,7 +195,40 @@ def fmt_pdt(iso_str):
     pdt = dt.astimezone(timezone(timedelta(hours=-7)))
     return pdt.strftime('%I:%M:%S %p')
 
-# ── Main Logic with Reversal Filter, Stop-Loss & Take-Profit ─────────────────
+# ── Market Strategies Integration ─────────────────────────────────────────────
+def apply_market_strategies(bar, cvd_window, price_window, volume_window, breakout):
+    """
+    Apply user-defined market strategies to confirm or filter breakout signals.
+    Parameters:
+        bar: Current bar data (dict with 'close', 'volume', 'cvd', etc.)
+        cvd_window: Deque of recent CVD values
+        price_window: Deque of recent close prices
+        volume_window: Deque of recent volume values
+        breakout: Initial breakout signal ('bullish', 'bearish', or 'none')
+    Returns:
+        str: Confirmed or adjusted breakout signal ('bullish', 'bearish', or 'none')
+    """
+    # Example placeholder strategy: Confirm breakout only if CVD is above its 5-period average
+    if len(cvd_window) >= WINDOW_SIZE:
+        cvd_avg = sum(cvd_window) / WINDOW_SIZE
+        if breakout == 'bullish' and bar['cvd'] <= cvd_avg:
+            print("    → filtered by strategy: CVD not above average")
+            return 'none'
+        if breakout == 'bearish' and bar['cvd'] >= cvd_avg:
+            print("    → filtered by strategy: CVD not below average")
+            return 'none'
+
+    # Add your custom strategies here, e.g.:
+    # - Check additional indicators (e.g., moving averages, RSI)
+    # - Custom price action rules
+    # - Volume thresholds
+    # Example:
+    # if breakout == 'bullish' and bar['close'] < some_moving_average:
+    #     return 'none'
+
+    return breakout
+
+# ── Main Logic with Strategies, Reversal Filter, Stop-Loss & Take-Profit ──────
 def main():
     # Read API key from environment
     key = ""
@@ -203,18 +236,17 @@ def main():
         print("❌ Please set the DATABENTO_API_KEY environment variable", file=sys.stderr)
         sys.exit(1)
 
-    start = '2025-05-08T06:00:00-07:00'
-    end   = '2025-05-08T09:00:00-07:00'
-
+    start         = '2025-05-05T06:30:00-07:00'
+    end           = '2025-05-05T12:45:00-07:00'
     cvd_window    = deque(maxlen=WINDOW_SIZE)
     price_window  = deque(maxlen=WINDOW_SIZE)
     volume_window = deque(maxlen=WINDOW_SIZE)
-    last_signal   = None  # track last entry direction
+    last_signal   = None  # Track last entry direction
     position      = None  # 'bullish' or 'bearish'
     stop_price    = None
     target_price  = None
 
-    print("📊 Streaming 1-min MESM5 bars with CVD + Trendlines + Filters + Reversal + Stop-Loss & TP")
+    print("📊 Streaming 1-min MESM5 bars with CVD + Trendlines + Strategies + Filters + Reversal + Stop-Loss & TP")
     i = 0
     for bar in stream_one_minute_bars(key, DATASET, SCHEMA, start, end, SYMBOL, True):
         i += 1
@@ -260,6 +292,9 @@ def main():
         # Fit trendlines & breakout
         y = np.array(cvd_window)
         sup_line, res_line, sup_slope, res_slope, breakout = fit_trendlines_window(y)
+
+        # Apply market strategies
+        breakout = apply_market_strategies(bar, cvd_window, price_window, volume_window, breakout)
 
         # Reversal filter
         if breakout in ('bullish','bearish') and breakout == last_signal:

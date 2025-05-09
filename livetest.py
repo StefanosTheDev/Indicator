@@ -18,30 +18,25 @@ import threading
 import time
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-WINDOW_SIZE  = 5              # Number of bars in each trendline window
-TOL_PCT      = 0.001          # 0.1% dynamic tolerance for breakout
-R_MULTIPLE   = 2              # Reward:risk multiple for target
-NO_DATA_TIMEOUT = 60          # Seconds to wait for data before warning
+WINDOW_SIZE      = 5      # Number of bars in each trendline window
+TOL_PCT          = 0.001  # 0.1% dynamic tolerance for breakout
+R_MULTIPLE       = 2      # Reward:risk multiple for target
+NO_DATA_TIMEOUT  = 60     # Seconds to wait for data before warning
 
-# Databento parameters (MESM5, CME Globex MDP-3.0, trade prints)
-DATASET = 'GLBX.MDP3'
+DATASET = 'GLBX.MDP3'     # Databento parameters (MESM5, CME Globex MDP-3.0, trade prints)
 SCHEMA  = 'trades'
 SYMBOL  = 'MESM5'
 
 # ── Logging Configuration ─────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.DEBUG,  # Detailed logging for troubleshooting
+    level=logging.INFO,   # only INFO+ messages
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
 # ── Helper Functions ──────────────────────────────────────────────────────────
 def get_cvd_color(close, open_, prev_high, prev_low, strong):
     """Determine CVD color based on price movement."""
-    if not strong:
-        if close > open_: return 'green'
-        if close < open_: return 'red'
-        return 'gray'
-    if prev_high is None or prev_low is None:
+    if not strong or prev_high is None or prev_low is None:
         if close > open_: return 'green'
         if close < open_: return 'red'
         return 'gray'
@@ -59,62 +54,52 @@ def stream_one_minute_bars(client, strong_updown=True):
 
     def process_trade(record):
         nonlocal current, running_cvd, prev_high, prev_low, last_trade_time
-        try:
-            # Skip non-trade messages
-            if not isinstance(record, db.TradeMsg):
-                logging.debug(f"Skipping non-trade message: {type(record).__name__}")
-                return
+        # Skip non-trade messages
+        if not isinstance(record, db.TradeMsg):
+            return
 
-            px = float(record.price) / 1e9
-            size = record.size
-            side = record.side
-            ts_ms = int(record.ts_event // 1_000_000)
-            dt = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).replace(second=0, microsecond=0)
-            iso = dt.isoformat()
+        px = float(record.price) / 1e9
+        size = record.size
+        side = record.side
+        ts_ms = int(record.ts_event // 1_000_000)
+        dt = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).replace(second=0, microsecond=0)
+        iso = dt.isoformat()
 
-            # Log trade details
-            logging.debug(f"Received trade: price={px}, size={size}, side={side}, ts_ms={ts_ms}")
+        # Update CVD
+        delta = size if side == 'B' else -size
+        running_cvd += delta
+        last_trade_time = time.time()
 
-            # Handle side for CVD ('B' = Bid/buy, 'A' = Ask/sell)
-            delta = size if side == 'B' else -size
-            running_cvd += delta
-            last_trade_time = time.time()
+        # New minute bar?
+        if current is None or current['timestamp'] != iso:
+            if current:
+                current['cvd'] = current['cvd_running']
+                current['cvd_color'] = get_cvd_color(
+                    current['close'], current['open'], prev_high, prev_low, strong_updown
+                )
+                bar_queue.put(current)
+                prev_high = current['high']
+                prev_low = current['low']
 
-            if current is None or current['timestamp'] != iso:
-                if current:
-                    current['cvd'] = current['cvd_running']
-                    current['cvd_color'] = get_cvd_color(
-                        current['close'], current['open'], prev_high, prev_low, strong_updown
-                    )
-                    logging.debug(f"Adding bar to queue: {current}")
-                    bar_queue.put(current)
-                    prev_high = current['high']
-                    prev_low = current['low']
+            current = {
+                'timestamp': iso,
+                'open': px,
+                'high': px,
+                'low': px,
+                'close': px,
+                'volume': size,
+                'delta': delta,
+                'cvd_running': running_cvd,
+            }
+        else:
+            # Update existing bar
+            current['high'] = max(current['high'], px)
+            current['low'] = min(current['low'], px)
+            current['close'] = px
+            current['volume'] += size
+            current['delta'] += delta
+            current['cvd_running'] = running_cvd
 
-                current = {
-                    'timestamp': iso,
-                    'open': px,
-                    'high': px,
-                    'low': px,
-                    'close': px,
-                    'volume': size,
-                    'delta': delta,
-                    'cvd_running': running_cvd,
-                }
-                logging.debug(f"Started new bar: {current}")
-            else:
-                current['high'] = max(current['high'], px)
-                current['low'] = min(current['low'], px)
-                current['close'] = px
-                current['volume'] += size
-                current['delta'] += delta
-                current['cvd_running'] = running_cvd
-                logging.debug(f"Updated bar: {current}")
-
-        except Exception as e:
-            logging.error(f"Error in process_trade: {e}", exc_info=True)
-
-    # Start the live client in a separate thread
     def run_client():
         try:
             client.subscribe(
@@ -129,35 +114,20 @@ def stream_one_minute_bars(client, strong_updown=True):
             client.block_for_close()
         except Exception as e:
             logging.error(f"Live client error: {e}", exc_info=True)
-            bar_queue.put(None)  # Signal termination
+            bar_queue.put(None)
 
     threading.Thread(target=run_client, daemon=True).start()
 
-    # Yield bars from the queue
+    # Yield only completed bars (block until each minute closes)
     while True:
-        try:
-            bar = bar_queue.get(timeout=NO_DATA_TIMEOUT)
-            if bar is None:
-                logging.error("Live client terminated unexpectedly")
-                break
-            logging.debug(f"Yielding bar: {bar}")
-            yield bar
-        except queue.Empty:
-            if time.time() - last_trade_time > NO_DATA_TIMEOUT:
-                logging.warning(f"No trades received for {NO_DATA_TIMEOUT} seconds. Verify MESM5 is active and market is open.")
-            if current:
-                current['cvd'] = current['cvd_running']
-                current['cvd_color'] = get_cvd_color(
-                    current['close'], current['open'], prev_high, prev_low, strong_updown
-                )
-                logging.debug(f"Yielding timed-out bar: {current}")
-                yield current
-                current = None
-            continue
+        bar = bar_queue.get()
+        if bar is None:
+            logging.error("Live client terminated unexpectedly")
+            return
+        yield bar
 
 # ── Trendline Fitting ──────────────────────────────────────────────────────────
 def check_trend_line(support, pivot, slope, y):
-    """Check if a trendline is valid and compute error."""
     intercept = -slope * pivot + y[pivot]
     x = np.arange(len(y))
     diffs = (slope * x + intercept) - y
@@ -166,7 +136,6 @@ def check_trend_line(support, pivot, slope, y):
     return (diffs ** 2).sum()
 
 def optimize_slope(support, pivot, init_slope, y):
-    """Optimize the slope for a trendline."""
     slope_unit = (y.max() - y.min()) / len(y)
     opt_step, min_step = 1.0, 1e-4
     best_slope = init_slope
@@ -195,11 +164,10 @@ def optimize_slope(support, pivot, init_slope, y):
             best_slope, best_err = trial, err_test
             get_derivative = True
 
-    best_intercept = -best_slope * pivot + y[pivot]
-    return best_slope, best_intercept
+    intercept = -best_slope * pivot + y[pivot]
+    return best_slope, intercept
 
 def fit_trendlines_window(y):
-    """Fit support and resistance trendlines to a window of CVD values."""
     N = len(y)
     x = np.arange(N)
     slope, _ = np.polyfit(x, y, 1)
@@ -212,10 +180,10 @@ def fit_trendlines_window(y):
     res_slope, res_int = optimize_slope(False, upper_pivot, slope, y)
 
     support_line = sup_slope * x + sup_int
-    resist_line = res_slope * x + res_int
+    resist_line  = res_slope * x + res_int
 
     last = y[-1]
-    tol = abs(resist_line[-1]) * TOL_PCT
+    tol  = abs(resist_line[-1]) * TOL_PCT
     if last >= resist_line[-1] - tol:
         breakout = 'bullish'
     elif last <= support_line[-1] + tol:
@@ -227,7 +195,6 @@ def fit_trendlines_window(y):
 
 # ── Formatter ─────────────────────────────────────────────────────────────────
 def fmt_pdt(iso_str):
-    """Format UTC timestamp to PDT."""
     dt = datetime.fromisoformat(iso_str)
     pdt = dt.astimezone(timezone(timedelta(hours=-7)))
     return pdt.strftime('%I:%M:%S %p')
@@ -235,24 +202,14 @@ def fmt_pdt(iso_str):
 # ── Main Logic with Reversal Filter, Stop-Loss & Take-Profit ─────────────────
 def main():
     # Read API key
-    key_suffix = key[-5:] if key else "None"
-    logging.info(f"Using API key with suffix: ...{key_suffix}")
-
+    key = ""
     if not key:
-        key = os.environ.get("DATABENTO_API_KEY")
-        key_suffix = key[-5:] if key else "None"
-        logging.info(f"Falling back to environment variable, API key suffix: ...{key_suffix}")
-        if not key:
-            logging.error("DATABENTO_API_KEY environment variable not set.")
-            key = input("Enter your Databento API key: ")
-            key_suffix = key[-5:] if key else "None"
-            logging.info(f"Using manually entered API key with suffix: ...{key_suffix}")
-        if not key.startswith("db-") or len(key) != 32:
-            logging.error("Invalid API key format. Must be a 32-character string starting with 'db-'.")
-            sys.exit(1)
+        key = input("Enter your Databento API key: ").strip()
+    if not key.startswith("db-") or len(key) != 32:
+        logging.error("Invalid API key format. Must start with 'db-' and be 32 chars.")
+        sys.exit(1)
 
     # Initialize Databento Live client
-    logging.debug("Initializing Live client")
     try:
         client = db.Live(key=key)
     except Exception as e:
@@ -260,119 +217,96 @@ def main():
         sys.exit(1)
 
     # Initialize state
-    cvd_window = deque(maxlen=WINDOW_SIZE)
-    price_window = deque(maxlen=WINDOW_SIZE)
+    cvd_window    = deque(maxlen=WINDOW_SIZE)
+    price_window  = deque(maxlen=WINDOW_SIZE)
     volume_window = deque(maxlen=WINDOW_SIZE)
-    last_signal = None  # Track last entry direction
-    position = None     # 'bullish' or 'bearish'
-    stop_price = None
-    target_price = None
+    last_signal   = None
+    position      = None
+    stop_price    = None
+    target_price  = None
 
     print("📊 Streaming live 1-min MESM5 bars with CVD + Trendlines + Filters + Reversal + Stop-Loss & TP")
-    i = 0
     try:
-        for bar in stream_one_minute_bars(client, strong_updown=True):
-            i += 1
-            time = fmt_pdt(bar['timestamp'])
-            print(f"#{i:<3} {time} | "
-                  f"O:{bar['open']:.2f} H:{bar['high']:.2f} "
-                  f"L:{bar['low']:.2f} C:{bar['close']:.2f} "
-                  f"Vol:{bar['volume']} CVD:{bar['cvd']} "
-                  f"Color:{bar['cvd_color']}")
+        for i, bar in enumerate(stream_one_minute_bars(client, strong_updown=True), start=1):
+            print(
+                f"#{i:03d} {fmt_pdt(bar['timestamp'])}  |  "
+                f"O:{bar['open']:.2f}  H:{bar['high']:.2f}  "
+                f"L:{bar['low']:.2f}  C:{bar['close']:.2f}  "
+                f"Vol:{bar['volume']}  CVD:{bar['cvd']}  "
+                f"{bar['cvd_color'].upper()}"
+            )
 
-            # Stop-loss or take-profit handling
+            # Stop-loss / take-profit checks
             if position == 'bullish':
                 if bar['low'] <= stop_price:
-                    print(f"  → 🚫 STOP-LOSS LONG @ {time} | stop was {stop_price:.2f}\n")
-                    position = None
-                    last_signal = None
+                    print(f"  → 🚫 STOP-LOSS LONG @ {fmt_pdt(bar['timestamp'])} | stop was {stop_price:.2f}\n")
+                    position = last_signal = None
                     continue
                 if bar['high'] >= target_price:
-                    print(f"  → 🎯 TAKE-PROFIT LONG @ {time} | target was {target_price:.2f}\n")
-                    position = None
-                    last_signal = None
+                    print(f"  → 🎯 TAKE-PROFIT LONG @ {fmt_pdt(bar['timestamp'])} | target was {target_price:.2f}\n")
+                    position = last_signal = None
                     continue
             elif position == 'bearish':
                 if bar['high'] >= stop_price:
-                    print(f"  → 🚫 STOP-LOSS SHORT @ {time} | stop was {stop_price:.2f}\n")
-                    position = None
-                    last_signal = None
+                    print(f"  → 🚫 STOP-LOSS SHORT @ {fmt_pdt(bar['timestamp'])} | stop was {stop_price:.2f}\n")
+                    position = last_signal = None
                     continue
                 if bar['low'] <= target_price:
-                    print(f"  → 🎯 TAKE-PROFIT SHORT @ {time} | target was {target_price:.2f}\n")
-                    position = None
-                    last_signal = None
+                    print(f"  → 🎯 TAKE-PROFIT SHORT @ {fmt_pdt(bar['timestamp'])} | target was {target_price:.2f}\n")
+                    position = last_signal = None
                     continue
 
-            # Accumulate windows
+            # Build rolling windows
             cvd_window.append(bar['cvd'])
             price_window.append(bar['close'])
             volume_window.append(bar['volume'])
-            if len(cvd_window) < WINDOW_SIZE:
+            if len(cvd_window) < WINDOW_SIZE or position is not None:
                 continue
 
-            # Skip new entries while in position
-            if position is not None:
-                print(f"    → in position ({position}), waiting for exit\n")
-                continue
-
-            # Fit trendlines & detect breakout
+            # Trendline & breakout detection
             y = np.array(cvd_window)
             sup_line, res_line, sup_slope, res_slope, breakout = fit_trendlines_window(y)
 
-            # Reversal filter
-            if breakout in ('bullish', 'bearish') and breakout == last_signal:
-                print(f"    → filtered: waiting for reversal from {last_signal}")
+            # Reversal, slope, price, and volume filters
+            if breakout == last_signal:
                 breakout = 'none'
-
-            # Slope filters
             if breakout == 'bullish' and res_slope <= 0:
-                print("    → filtered: resistance slope not positive")
                 breakout = 'none'
             if breakout == 'bearish' and sup_slope >= 0:
-                print("    → filtered: support slope not negative")
                 breakout = 'none'
-
-            # Price & volume confirmations
             if breakout == 'bullish' and bar['close'] <= max(list(price_window)[:-1]):
-                print("    → filtered: price did not exceed recent highs")
                 breakout = 'none'
             if breakout == 'bearish' and bar['close'] >= min(list(price_window)[:-1]):
-                print("    → filtered: price did not drop below recent lows")
                 breakout = 'none'
-
-            avg_vol = sum(list(volume_window)[:-1]) / (len(volume_window) - 1)
-            if breakout in ('bullish', 'bearish') and bar['volume'] <= avg_vol:
-                print("    → filtered: volume below recent average")
+            avg_vol = sum(list(volume_window)[:-1])/(len(volume_window)-1)
+            if breakout in ('bullish','bearish') and bar['volume'] <= avg_vol:
                 breakout = 'none'
 
             # Emit entry
             if breakout in ('bullish', 'bearish'):
-                entry_price = bar['close']
+                entry = bar['close']
                 if breakout == 'bullish':
-                    stop_price = min(list(price_window))
-                    R = entry_price - stop_price
-                    target_price = entry_price + R * R_MULTIPLE
+                    stop_price = min(price_window)
+                    R = entry - stop_price
+                    target_price = entry + R*R_MULTIPLE
                 else:
-                    stop_price = max(list(price_window))
-                    R = stop_price - entry_price
-                    target_price = entry_price - R * R_MULTIPLE
+                    stop_price = max(price_window)
+                    R = stop_price - entry
+                    target_price = entry - R*R_MULTIPLE
 
                 print(f"    → ENTRY SIGNAL: {breakout.upper()}")
                 print(f"       Stop price:   {stop_price:.2f}")
                 print(f"       Target price: {target_price:.2f}\n")
 
-                position = breakout
-                last_signal = breakout
+                position = last_signal = breakout
 
-    except db.BentoError as e:
-        logging.error(f"Databento error: {e}")
-        logging.info("Verify API key and permissions in the Databento portal (https://databento.com/portal).")
-        sys.exit(1)
     except KeyboardInterrupt:
-        logging.info("Received KeyboardInterrupt, stopping live client")
+        logging.info("Interrupted by user; stopping client.")
         client.stop()
         sys.exit(0)
+    except db.BentoError as e:
+        logging.error(f"Databento error: {e}")
+        sys.exit(1)
     except Exception as e:
         logging.error(f"Unexpected error: {e}", exc_info=True)
         sys.exit(1)
