@@ -128,7 +128,25 @@ function optimizeSlope(
   let derivative = 0;
   let getDerivative = true;
 
+  // V3 Dynamic Bailout - Start
+
+  const maxIters = y.length * 20; // V3: allow 20 loops per bar in window
+  const maxNoImprove = y.length * 5; // V3: bail if no improvement for 5×bars
+  let iters = 0; // V3: iteration counter
+  let noImprove = 0; // V3: no-improvement counter
+
+  // V3: dynamic bailout - end
+
   while (optStep > minStep) {
+    iters++; // V3: increment iteration count
+    if (iters >= maxIters || noImprove >= maxNoImprove) {
+      // V3: bail condition
+      console.warn(
+        // V3: log bail-out
+        `[optimizeSlope] V3 bail-out: iters=${iters}, noImprove=${noImprove}, window=${y.length}`
+      );
+      break; // V3: exit loop
+    }
     if (getDerivative) {
       let testSlope = bestSlope + slopeUnit * minStep;
       let errTest = checkTrendLine(support, pivot, testSlope, y);
@@ -147,10 +165,12 @@ function optimizeSlope(
     const errTest = checkTrendLine(support, pivot, trial, y);
     if (errTest < 0 || errTest >= bestErr) {
       optStep *= 0.5;
+      noImprove++; // V3 count non-improving iterations
     } else {
       bestSlope = trial;
       bestErr = errTest;
       getDerivative = true;
+      noImprove = 0; // V3 Reset on improvement.
     }
   }
 
