@@ -16,21 +16,13 @@ export class CdStrategy extends AStrategy {
   stopPrice = 0;
   targetPrice = 0;
 
-  // V2 CVD change: maintain running cumulative delta, ignoring neutrals
-  private cvdRunning: number = 0;
-
   constructor(bt: AutoTrade) {
     super(name, bt);
   }
 
   onCandle(wc: WorldCandle, bar: CandleAI) {
     const me = this;
-    // V2 CVD change: treat neutral prints as zero and recalculate CVD
-    const delta =
-      bar.side === 'B' ? bar.size : bar.side === 'A' ? -bar.size : 0;
-    me.cvdRunning += delta;
-    bar.cdv = me.cvdRunning;
-    // end CVD change
+    // console.info(x.t, x.cdv);
 
     let cvdWindow = me.cvdWindow;
     let priceWindow = me.priceWindow;
@@ -47,35 +39,45 @@ export class CdStrategy extends AStrategy {
     if (priceWindow.length > WINDOW_SIZE) me.priceWindow.shift();
     if (volumeWindow.length > WINDOW_SIZE) me.volumeWindow.shift();
 
+
     // Fit trendlines & detect breakout
     const { supSlope, resSlope, breakout } = fitTrendlinesWindow(cvdWindow);
     let signal = breakout;
 
     // Reversal filter
     if (signal !== 'none' && signal === me.lastSignal) {
+      // console.info(`    → filtered: waiting for reversal from ${me.lastSignal}`);
       signal = 'none';
     }
 
     // Slope filters
     if (signal === 'bullish' && resSlope <= 0) {
+      // console.info('    → filtered: resistance slope not positive');
       signal = 'none';
     }
     if (signal === 'bearish' && supSlope >= 0) {
+      // console.info('    → filtered: support slope not negative');
       signal = 'none';
     }
 
     // Price & volume confirmations
     const prevPrices = priceWindow.slice(0, -1);
     if (signal === 'bullish' && close <= Math.max(...prevPrices)) {
+      // console.info('    → filtered: price did not exceed recent highs');
       signal = 'none';
     }
     if (signal === 'bearish' && close >= Math.min(...prevPrices)) {
+      // console.info('    → filtered: price did not drop below recent lows');
       signal = 'none';
     }
     const avgVol =
       volumeWindow.slice(0, -1).reduce((a, b) => a + b, 0) /
       (volumeWindow.length - 1);
-    if ((signal === 'bullish' || signal === 'bearish') && vol <= avgVol) {
+    if (
+      (signal === 'bullish' || signal === 'bearish') &&
+      vol <= avgVol
+    ) {
+      // console.info('    → filtered: volume below recent average');
       signal = 'none';
     }
 
@@ -92,11 +94,16 @@ export class CdStrategy extends AStrategy {
         me.targetPrice = entry - R * R_MULTIPLE;
       }
       console.info(`    → ENTRY SIGNAL: ${signal.toUpperCase()}`);
+      // console.info(`       Stop price:   ${me.stopPrice.toFixed(2)}`);
+      // console.info(`       Target price: ${me.targetPrice.toFixed(2)}`);
+      // console.info('');
+      
       wc.tradeMan.tradeManTakeTrade(me.bt, name, 0, signal === 'bullish');
 
       me.position = signal;
       me.lastSignal = signal;
     }
+    
   }
 }
 
@@ -128,25 +135,7 @@ function optimizeSlope(
   let derivative = 0;
   let getDerivative = true;
 
-  // V3 Dynamic Bailout - Start
-
-  const maxIters = y.length * 20; // V3: allow 20 loops per bar in window
-  const maxNoImprove = y.length * 5; // V3: bail if no improvement for 5×bars
-  let iters = 0; // V3: iteration counter
-  let noImprove = 0; // V3: no-improvement counter
-
-  // V3: dynamic bailout - end
-
   while (optStep > minStep) {
-    iters++; // V3: increment iteration count
-    if (iters >= maxIters || noImprove >= maxNoImprove) {
-      // V3: bail condition
-      console.warn(
-        // V3: log bail-out
-        `[optimizeSlope] V3 bail-out: iters=${iters}, noImprove=${noImprove}, window=${y.length}`
-      );
-      break; // V3: exit loop
-    }
     if (getDerivative) {
       let testSlope = bestSlope + slopeUnit * minStep;
       let errTest = checkTrendLine(support, pivot, testSlope, y);
@@ -165,12 +154,10 @@ function optimizeSlope(
     const errTest = checkTrendLine(support, pivot, trial, y);
     if (errTest < 0 || errTest >= bestErr) {
       optStep *= 0.5;
-      noImprove++; // V3 count non-improving iterations
     } else {
       bestSlope = trial;
       bestErr = errTest;
       getDerivative = true;
-      noImprove = 0; // V3 Reset on improvement.
     }
   }
 
@@ -212,8 +199,8 @@ function fitTrendlinesWindow(y: number[]): {
     last >= resistLine[N - 1] - tol
       ? 'bullish'
       : last <= supportLine[N - 1] + tol
-      ? 'bearish'
-      : 'none';
+        ? 'bearish'
+        : 'none';
 
   return { supportLine, resistLine, supSlope, resSlope, breakout };
 }

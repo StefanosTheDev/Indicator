@@ -9,6 +9,16 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*", "misc/aaa.ts", "indeax.ts"],
+  "include": [
+    "src/**/*",
+    "misc/aaa.ts",
+    "indeax.ts",
+    "WORKING/indicatorV2OG.ts",
+    "src/indicator-1-min.ts",
+    "Version Control/updated-og.ts",
+    "Version Control/updated.ts",
+    "Version Control/indicatorV4.ts",
+    "WORKING/indicatorV2.ts"
+  ],
   "exclude": ["node_modules", "dist"]
 }

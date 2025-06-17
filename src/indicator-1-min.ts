@@ -17,7 +17,7 @@ interface Trade {
   px: number;
   size: number;
   // https://databento.com/docs/standards-and-conventions/common-fields-enums-types#side?historical=http&live=python&reference=http
-  side: 'B' | 'S';  // 'A' | 'B' | 'N'
+  side: 'B' | 'S'; // 'A' | 'B' | 'N'
   ts_ms: number;
 }
 
@@ -183,9 +183,8 @@ async function* streamOneMinuteBars(
     );
     yield current;
   }
-}
+} // ── Trendline Fitting ──────────────────────────────────────────────────────────
 
-// ── Trendline Fitting ──────────────────────────────────────────────────────────
 function checkTrendLine(
   support: boolean,
   pivot: number,
@@ -213,7 +212,20 @@ function optimizeSlope(
   let derivative = 0;
   let getDerivative = true;
 
+  // V3 Dynamic Bailout
+  const maxIters = y.length * 20;
+  const maxNoImprove = y.length * 5;
+  let iters = 0;
+  let noImprove = 0;
+
   while (optStep > minStep) {
+    iters++;
+    if (iters >= maxIters || noImprove >= maxNoImprove) {
+      console.warn(
+        `[optimizeSlope] V3 bail-out: iters=${iters}, noImprove=${noImprove}, window=${y.length}`
+      );
+      break;
+    }
     if (getDerivative) {
       let testSlope = bestSlope + slopeUnit * minStep;
       let errTest = checkTrendLine(support, pivot, testSlope, y);
@@ -232,10 +244,12 @@ function optimizeSlope(
     const errTest = checkTrendLine(support, pivot, trial, y);
     if (errTest < 0 || errTest >= bestErr) {
       optStep *= 0.5;
+      noImprove++;
     } else {
       bestSlope = trial;
       bestErr = errTest;
       getDerivative = true;
+      noImprove = 0;
     }
   }
 
@@ -297,14 +311,13 @@ function fmtPdt(iso: string): string {
 
 // ── Main Logic ───────────────────────────────────────────────────────────────
 async function main() {
-  const key = 'db-QnnN73X5bwsvBSV74f6GFFuHRKSAV';
+  const key = 'db-n6Vh58u3yPLaYNAvvLTSnabf9xQ8R';
   if (!key) {
     console.error('❌ Please set DATABENTO_API_KEY');
     process.exit(1);
   }
-
-  const start = '2025-05-05T06:30:00-07:00'; // 6:30 AM PDT
-  const end = '2025-05-05T12:45:00-07:00'; // 12:45 PM PDT
+  const start = '2025-05-07T18:00:00-04:00';
+  const end = '2025-05-07T21:00:00-04:00';
 
   const cvdWindow: number[] = [];
   const priceWindow: number[] = [];
